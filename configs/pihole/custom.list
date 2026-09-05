@@ -1,0 +1,9 @@
+# ==============================================================================
+# RECONSTRUCTED CONFIGURATION TEMPLATE BASED ON VERIFIED LIVE SETTINGS
+# Target Path: /etc/pihole/custom.list inside Pi-hole persistent volume
+# Maps internal domain names to the pfSense WAN ingress interface IP.
+# ==============================================================================
+
+192.168.100.250 nextcloud.lab.local
+192.168.100.250 git.lab.local
+192.168.100.250 pihole.lab.local

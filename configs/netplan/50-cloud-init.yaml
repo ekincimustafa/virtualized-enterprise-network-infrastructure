@@ -1,0 +1,19 @@
+# ==============================================================================
+# RECONSTRUCTED CONFIGURATION TEMPLATE BASED ON VERIFIED LIVE NETWORK SETTINGS
+# Target Path: /etc/netplan/50-cloud-init.yaml on Compute Node (Ubuntu Server 24.04)
+# ==============================================================================
+
+network:
+  version: 2
+  ethernets:
+    ens33:
+      dhcp4: no
+      addresses:
+        - 10.10.20.50/24
+      routes:
+        - to: default
+          via: 10.10.20.1
+      nameservers:
+        addresses:
+          - 10.10.20.1
+          - 8.8.8.8
