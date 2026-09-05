@@ -235,6 +235,9 @@ Docker Engine CE operates as the container runtime on the Ubuntu compute node an
 
 > **Security note:** Never commit real passwords, API keys, tokens, or private certificates. The example below uses an environment-variable placeholder for the Pi-hole password; keep the real value in a local `.env` file that is excluded by `.gitignore`.
 Persistent application data directories are bound to the local TrueNAS-backed NFS mount (`/mnt/truenas_data`), keeping application data outside the Ubuntu VM's local root filesystem:
+> **Reconstruction note:** The Compose definition below was reconstructed from the
+> container and Portainer configuration used in the lab for documentation and
+> reproducibility. It was not the original deployment source file.
 
 ```yaml
 version: "3"
