@@ -95,17 +95,18 @@ graph TD
     HostClient -->|DNS Queries :53 UDP| Pihole
     HostClient -->|HTTP / HTTPS Ingress| WAN_NIC
     LAN_NIC --> Netplan
-    NFSMount <==|NFSv4 RPC :2049| TrueNAS_IP
-    
+    NFSMount -->|"NFSv4 RPC :2049"| TrueNAS_IP
+    TrueNAS_IP -->|"NFSv4 Response"| NFSMount
+
     %% Ingress Forwarding
-    NPM -->|Host: nextcloud.lab.local| Nextcloud
-    NPM -->|Host: git.lab.local| Gitea
-    NPM -->|Host: pihole.lab.local| Pihole
+    NPM -->|"Host: nextcloud.lab.local"| Nextcloud
+    NPM -->|"Host: git.lab.local"| Gitea
+    NPM -->|"Host: pihole.lab.local"| Pihole
 
     %% Storage Decoupling
-    Nextcloud -.->|Persistent Data| NFSMount
-    Gitea -.->|Repositories & SQLite| NFSMount
-    Pihole -.->|DNS Records & Config| NFSMount
+    Nextcloud -.->|"Persistent Data"| NFSMount
+    Gitea -.->|"Repositories and SQLite"| NFSMount
+    Pihole -.->|"DNS Records and Config"| NFSMount
 ```
 
 ---
@@ -478,7 +479,7 @@ Because services exhibit strict directed acyclic graph (DAG) dependencies, recov
 To maintain a professional DevOps/Infrastructure repository, the following directory layout is recommended. Treat it as a **target structure**: add only files that you actually export, reconstruct, or verify from the lab instead of creating placeholder files solely to match the tree.
 
 ```text
-enterprise-homelab-infrastructure/
+virtualized-enterprise-network-infrastructure/
 ├── README.md                           # Master technical documentation (this file)
 ├── LICENSE                             # Open-source license (MIT / Apache 2.0)
 ├── .gitignore                          # Excludes VMDKs, ISOs, .env, and local logs
