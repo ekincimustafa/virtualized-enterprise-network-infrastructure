@@ -1,0 +1,9 @@
+# RECONSTRUCTED SANITIZED DOCUMENTATION SUMMARY
+# Note: Raw pfSense configuration backups are intentionally excluded because they may contain sensitive configuration metadata.
+# Management Note: pfSense WebConfigurator was moved from 443/TCP to 8443/TCP (https://192.168.100.250:8443) to avoid conflict with NPM HTTPS ingress.
+interface,protocol,external_ip,external_port,target_ip,target_port,service,purpose,status
+WAN,TCP,192.168.100.250,2222,10.10.20.50,22,SSH,Secure administrative shell access to Ubuntu compute node,Verified
+WAN,TCP,192.168.100.250,80,10.10.20.50,80,HTTP,Layer 7 HTTP ingress routing via Nginx Proxy Manager,Verified
+WAN,TCP,192.168.100.250,443,10.10.20.50,443,HTTPS,Layer 7 HTTPS ingress routing via Nginx Proxy Manager,Verified
+WAN,TCP,192.168.100.250,81,10.10.20.50,81,HTTP,Nginx Proxy Manager administrative web console,Verified
+WAN,TCP,192.168.100.250,9443,10.10.20.50,9443,HTTPS,Portainer CE container management web interface,Verified
