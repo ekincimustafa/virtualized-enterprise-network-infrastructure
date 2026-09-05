@@ -1,0 +1,55 @@
+# ==========================================
+# Enterprise Virtualization & OS Artifacts
+# ==========================================
+*.vmdk
+*.vmem
+*.nvram
+*.vmsd
+*.vmss
+*.vmsn
+*.iso
+*.ova
+*.ovf
+*.qcow2
+*.img
+
+# ==========================================
+# Credentials, Secrets & Runtime Environments
+# ==========================================
+.env
+.env.local
+*.pem
+*.key
+*.crt
+*.pfx
+*.ppk
+id_rsa
+id_ed25519
+
+# ==========================================
+# Database & Live Storage Mounts
+# ==========================================
+*.sqlite
+*.sqlite3
+*.db
+/mnt/
+/data/
+
+# ==========================================
+# Operating System & IDE Caches
+# ==========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~
+
+# ==========================================
+# Logs & Temporary Files
+# ==========================================
+*.log
+logs/
+temp/
+tmp/
