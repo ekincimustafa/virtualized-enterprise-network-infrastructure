@@ -1,316 +1,598 @@
-# Storage and ZFS Design: Decoupled Network Storage Fabric
+# Storage and ZFS Design: Centralized NFS Storage Fabric
 
 ---
 
-## 1. Purpose and Storage Requirements
+## 1. Purpose and Scope
 
-In traditional homelab and server environments, persistent application state is commonly written directly to the local virtual disk of the compute virtual machine. While straightforward, this tightly couples the lifecycle of the application runtime to the virtual machine itself. If the compute operating system requires a reinstallation, experiences a kernel panic, or suffers filesystem corruption, persistent databases, configuration files, and user uploads are placed at immediate risk.
+This document describes the **verified final storage architecture** of the Virtualized Enterprise Network Infrastructure homelab.
 
-The storage architecture of this project was designed to address this problem by separating application execution from persistent data storage:
-* **Compute Tier:** The Ubuntu Server compute node hosts container runtimes, system logs, and temporary OS files, but offloads persistent business state. While the compute node is not completely stateless—retaining its base operating system, network configuration, and container images—it retains minimal critical application state.
-* **Centralized Storage:** Databases, Git repositories, and cloud uploads are directed to an independent virtual storage appliance running **TrueNAS SCALE** and managed by **OpenZFS**.
-* **Protocol Abstraction:** Storage is exported over the internal network using **NFSv4**, allowing compute nodes to interact with remote storage via standard POSIX filesystem operations.
+The final implementation differs from an earlier design iteration in two important ways:
 
-> **Engineering Note:** This architecture models enterprise data center separation patterns within the boundaries of a single physical machine. It is not presented as an enterprise-grade high-availability system; rather, it provides a controlled demonstration of compute/storage decoupling under strict hardware constraints.
+1. **TrueNAS is located on the host-side `192.168.100.0/24` network**, not directly on the Ubuntu server subnet.
+2. The TrueNAS NFS export is used by **both nested ESXi and Ubuntu**, making TrueNAS a central infrastructure dependency rather than only an application-data server.
+
+The storage design models separation of compute and storage within a single physical workstation. It is not a high-availability or physically redundant storage architecture.
 
 ---
 
-## 2. Storage Architecture Overview
+## 2. Verified Storage Topology
 
-The end-to-end storage pipeline spans multiple abstraction layers, from the underlying virtual disk allocated in VMware to the application processes running inside Docker containers:
+```text
+Physical Windows Host
+        |
+        v
+VMware Workstation Pro 26H1
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+TrueNAS SCALE                   Nested ESXi 7.0.3
+192.168.100.128                 192.168.100.129
+        |                             |
+        | NFS export                  | NFS datastore
+        |                             |
+        +------ /mnt/ESXi_Pool/NFS_Datastore
+                                      |
+                                      +-- pfSense-Firewall
+                                      +-- Ubuntu_Server_01
+                                      +-- Windows-Server-AD
 
-```
-+-----------------------------------------------------------------------------+
-|                          TRUENAS SCALE STORAGE NODE                         |
-|                                 (10.10.20.x)                                |
-+-----------------------------------------------------------------------------+
-|  OpenZFS Storage Layer                                                      |
-|   └── Storage Pool (zpool)                                                  |
-|         ├── Native lz4 Compression                                          |
-|         ├── Transactional Copy-on-Write (CoW) Semantics                     |
-|         └── Application Datasets (/nextcloud, /gitea, /pihole)              |
-|                                                                             |
-|  NFSv4 Service                                           |
-|   ├── Listening: TCP Port 2049                                              |
-|   ├── Export Subnet: 10.10.20.0/24                                          |
-|   └── Maproot Configuration: root:root                                      |
-+-----------------------------------------------------------------------------+
-                                       │
-                                       │ NFSv4 Protocol (TCP 2049)
-                                       │ Same-subnet VMware virtual network communication
-                                       ▼
-+-----------------------------------------------------------------------------+
-|                     UBUNTU SERVER 24.04 LTS COMPUTE NODE                    |
-|                                (10.10.20.50)                                |
-+-----------------------------------------------------------------------------+
-|  Linux Kernel VFS / NFS Client (nfs.ko)                                     |
-|   └── Persistent Mount Point: /mnt/truenas_data (/etc/fstab with _netdev)   |
-|                                                                             |
-|  Docker Engine Runtime (Container Host Bind Mounts)                         |
-|   ├── Nextcloud Container ────> /mnt/truenas_data/nextcloud/data            |
-|   ├── Gitea Container ────────> /mnt/truenas_data/gitea                     |
-|   ├── Pi-hole Container ──────> /mnt/truenas_data/pihole/etc-pihole         |
-|   └── NPM (Reconstructed) ────> /mnt/truenas_data/npm/...                   |
-+-----------------------------------------------------------------------------+
+Ubuntu Server
+10.10.20.50
+ens160
+        |
+        | route via pfSense 10.10.20.1
+        v
+192.168.100.128:/mnt/ESXi_Pool/NFS_Datastore
+        |
+        v
+/mnt/truenas_data
+        |
+        +-- container persistent paths
 ```
 
+The same TrueNAS export therefore serves two distinct consumers:
+
+- **ESXi**, as `NFS_Datastore`;
+- **Ubuntu**, as `/mnt/truenas_data`.
+
 ---
 
-## 3. Why TrueNAS Was Separated from Compute
+## 3. TrueNAS Storage Appliance
 
-In Linux environments, OpenZFS can be installed natively on Ubuntu (`zfsutils-linux`), allowing storage pools to run directly on the compute host without an additional virtual machine. A separate storage VM was chosen as an architectural separation-of-concerns decision rather than as a technical requirement of OpenZFS.
+TrueNAS runs directly under VMware Workstation rather than inside nested ESXi.
 
-However, TrueNAS SCALE was provisioned as an independent virtual appliance based on the **Separation of Concerns** principle:
+Verified address:
 
-1. **Independent System Lifecycles:**  
-   The compute node undergoes frequent software modifications: kernel updates, container runtime upgrades, dependency installations, and exploratory testing. If a package conflict or misconfiguration compromises Ubuntu, the storage appliance remains unaffected.
-2. **Dedicated Storage Resource Management:**  
-   OpenZFS relies heavily on system memory for its caching subsystem (Adaptive Replacement Cache - ARC). Running storage and container workloads in separate VMs creates an explicit resource boundary that can be sized and managed independently. This does not eliminate contention on the physical host, but it makes the division between compute and storage resources clearer.
-3. **Enterprise Architecture Modeling:**  
-   In production data centers, compute clusters (e.g., hypervisor clusters, worker nodes) do not manage physical storage arrays directly. They consume shared block (SAN) or file (NAS) storage fabrics. Isolating TrueNAS reproduces this architectural boundary.
+```text
+192.168.100.128
+```
+
+Observed storage pool:
+
+```text
+ESXi_Pool
+```
+
+The live TrueNAS storage view showed OpenZFS-backed storage with `lz4` compression enabled.
+
+### Verified storage services
+
+The TrueNAS Shares interface showed the following services active:
+
+- **SMB** — running
+- **NFS** — running
+- **iSCSI** — running
+
+The primary NFS export used by this project is:
+
+```text
+/mnt/ESXi_Pool/NFS_Datastore
+```
+
+![TrueNAS storage services](screenshots/04-truenas-storage-services.png)
+
+### Scope boundary
+
+This repository does **not** claim that the lab implements any of the following unless separately demonstrated:
+
+- RAIDZ;
+- disk mirroring;
+- automated snapshot schedules;
+- replication;
+- failover;
+- dedicated SLOG;
+- L2ARC;
+- production-grade backup retention.
+
+The environment is intentionally constrained by a single physical workstation.
 
 ---
 
 ## 4. OpenZFS Role
 
-OpenZFS provides the storage pool and filesystem layer on TrueNAS SCALE. Some capabilities below are inherent OpenZFS behavior, while only settings explicitly documented as verified should be interpreted as lab-specific configuration.
+OpenZFS provides the storage pool and filesystem layer behind the TrueNAS services.
 
-### 4.1 Storage Pool (`zpool`) Abstraction
-OpenZFS abstracts virtual disks into a unified storage pool (`zpool`). Rather than formatting traditional partitions with fixed boundaries, the pool serves as a dynamic allocation space from which logical datasets draw storage on demand.
+### 4.1 Copy-on-Write semantics
 
-### 4.2 Granular Dataset Segmentation
-Within the storage pool, isolated datasets were created for distinct application workloads. Datasets behave like dedicated filesystems, allowing independent configuration of compression, access permissions, and export policies without requiring partition resizing.
+OpenZFS uses Copy-on-Write behavior for filesystem updates. New blocks are written before metadata pointers are updated to reference the new state.
 
-### 4.3 Copy-on-Write (CoW) Semantics
-Traditional filesystems (such as ext4 without special journaling modes) overwrite data in-place. An unexpected power failure or hypervisor shutdown during a write operation can leave blocks partially written, causing metadata corruption.
-* OpenZFS enforces Copy-on-Write: when data is modified, the new data is written to unallocated blocks. Only after the write is confirmed do metadata pointers update to reference the new block.
-* *Limitation Note:* While CoW protects filesystem metadata consistency during sudden outages, it does not prevent application-level data corruption if a database container crashes mid-transaction.
+This improves filesystem consistency during interrupted writes, but it does **not** make application-level transactions immune to crashes.
 
-### 4.4 Block-Level Checksumming
-OpenZFS stores checksums for data and metadata and verifies them during normal I/O. The exact checksum algorithm was not separately recorded for this lab.
-* *Important Architectural Distinction:* In multi-disk mirrored or RAIDZ pools, OpenZFS uses parity data to automatically self-heal corrupted blocks. In this homelab, because storage is backed by a single virtual disk, OpenZFS can **detect** bitrot, but it cannot automatically repair corrupted data blocks due to the lack of redundant parity.
+### 4.2 Checksumming
 
-### 4.5 Inline `lz4` Compression
-The documented datasets used native `lz4` compression. `lz4` is commonly chosen for fast compression and decompression with relatively low CPU overhead; actual performance and space savings depend on workload characteristics.
+OpenZFS checksums data and metadata during normal operation.
 
----
+A key distinction is that **checksumming and self-healing are not the same thing**. Self-healing requires a valid redundant copy from which damaged data can be reconstructed. Because physical redundancy was not verified for this lab, this repository does not claim automatic recovery from every corrupted block.
 
-## 5. Dataset and Persistent Data Organization
+### 4.3 `lz4` compression
 
-Storage is structured around application-oriented datasets on TrueNAS SCALE, mounted under `/mnt/truenas_data` on the compute node:
+`lz4` compression was visible in the live TrueNAS configuration and is therefore treated as verified.
 
-| Service | Persistent Data Role | Ubuntu Host Path | Storage Backend | Implementation Status |
-| :--- | :--- | :--- | :--- | :---: |
-| **Nextcloud** | File uploads, user profiles, internal app data | `/mnt/truenas_data/nextcloud/data` | TrueNAS SCALE ZFS Dataset | ✅ Verified Live |
-| **Gitea** | Git repositories, user metadata, SQLite database | `/mnt/truenas_data/gitea` | TrueNAS SCALE ZFS Dataset | ✅ Verified Live |
-| **Pi-hole** | DNS blocklists, custom A records (`custom.list`), FTL db | `/mnt/truenas_data/pihole/etc-pihole` | TrueNAS SCALE ZFS Dataset | ✅ Verified Live |
-| **Nginx Proxy Manager** | Proxy host configurations and runtime certificates | `/mnt/truenas_data/npm/data`<br>`/mnt/truenas_data/npm/letsencrypt` | Reconstructed Compose path | 🔄 Reconstructed Artifact |
-
-> **Verification Boundary:** In the live lab, dedicated datasets were verified for Nextcloud, Gitea, and Pi-hole. The paths for Nginx Proxy Manager are included in the declarative [compose/docker-compose.yml](../compose/docker-compose.yml) template to enable complete stack reproducibility, but an independently isolated ZFS dataset for NPM was not permanently logged in the live environment. Underlying physical disk designations, pool names, and dataset quotas were intentionally not frozen.
+Compression savings depend on workload characteristics; no benchmark or compression-ratio claim is made here.
 
 ---
 
-## 6. NFSv4 Architecture
+## 5. Dataset and Directory Interpretation
 
-Persistent network sharing between TrueNAS SCALE and Ubuntu Server relies on **NFSv4** (Network File System version 4):
+An earlier documentation draft described dedicated ZFS datasets for individual applications such as Nextcloud, Gitea, and Pi-hole.
 
-* **Client/Server Model:** TrueNAS provides the NFS service, while Ubuntu acts as the NFS client and mounts the exported storage through the Linux NFS client stack.
-* **Port Consolidation (TCP Port 2049):** Unlike NFSv3, which required multiple auxiliary services (`rpcbind`, `statd`, `lockd`) operating across dynamically assigned high-numbered UDP/TCP ports, the documented NFSv4 service in this lab uses **TCP port 2049**, which simplifies the primary storage service path compared with older multi-service RPC layouts.
-* **Stateful Sessions:** NFSv4 maintains stateful client-server sessions, tracking file open/close states and locks directly within the protocol.
+The final live evidence does **not** support that claim.
 
-### Network Path and Routing Clarification
-Both Ubuntu (`10.10.20.50`) and TrueNAS SCALE (`10.10.20.x`) reside within the same internal virtual subnet: `10.10.20.0/24`.
-* **Same-Subnet Communication:** Communication between the compute node and storage node occurs directly across the VMware virtual switch (VMnet).
-* **No Firewall Traversal:** Because traffic remains within the local broadcast domain, NFS packets do not require pfSense Layer 3 forwarding because the endpoints share the same subnet. pfSense remains relevant for the lab's routed ingress and default-gateway functions.
-
----
-
-## 7. Persistent Mounting with `/etc/fstab`
-
-To ensure storage persistence across compute node reboots, the remote NFS export is declared in `/etc/fstab` on Ubuntu Server:
+The verified TrueNAS dataset/storage view showed entries including:
 
 ```text
-# ==============================================================================
-# SANITIZED STORAGE MOUNT CONFIGURATION (/etc/fstab)
-# Note: Target IP 10.10.20.x represents the verified TrueNAS internal LAN address.
-# ==============================================================================
-10.10.20.x:/mnt/truenas_pool/data  /mnt/truenas_data  nfs  defaults,_netdev  0  0
+ESXi_Pool
+├── Backups
+├── NFS_Datastore
+├── SharedResource
+└── WinServer_iSCSI_LUN
 ```
 
-### The Role and Limitations of `_netdev`
-The `_netdev` mount option is useful for declaring that a filesystem depends on network availability:
-* **Systemd Integration:** In modern Linux distributions managed by systemd, local filesystems are mounted early in the boot process before network interfaces are brought up. Without `_netdev`, systemd attempts to mount the remote NFS share immediately, causing boot timeouts or halting the system into emergency recovery mode.
-* **Dependency Ordering:** The `_netdev` directive flags the mount as network-dependent, instructing systemd to defer mounting until `network-online.target` is reached.
-* **Important Operational Nuance:** `_netdev` helps order the mount relative to network availability, but it does **not** guarantee that the remote TrueNAS service is already ready or that the NFS export is reachable when the mount is attempted.
+The ESXi datastore browser then showed directories such as:
 
-Operational validation of this mount is encapsulated in the read-only diagnostic script [scripts/nfs-mount-verify.sh](../scripts/nfs-mount-verify.sh).
-
----
-
-## 8. Docker Bind Mount Integration
-
-The compute instance executes microservices inside Docker containers while mounting persistent directories directly from the host filesystem. It is important to clarify that this architecture uses **standard Linux host bind mounts**, rather than specialized third-party Docker volume plugins:
-
-```
-[ Container Process (e.g., Gitea) ]
-             │
-             │ Writes to container path: /data
-             ▼
-[ Container Mount Namespace (VFS) ]
-             │
-             │ Mapped via Compose volume declaration
-             ▼
-[ Ubuntu Host Filesystem Path: /mnt/truenas_data/gitea ]
-             │
-             │ Intercepted by Linux Kernel NFS Client (nfs.ko)
-             ▼
-[ Network Protocol RPC Call (NFSv4 over TCP 2049) ]
-             │
-             │ Transmitted directly across internal 10.10.20.0/24 subnet
-             ▼
-[ TrueNAS SCALE OpenZFS Dataset: /gitea ]
+```text
+gitea/
+nextcloud/
+npm/
+pihole/
+pfSense-Firewall/
+Ubuntu_Server_01/
+Windows-Server-AD/
 ```
 
-### 8.1 Docker Abstraction Layer
-From Docker's perspective, `/mnt/truenas_data/...` is a host path that can be bind-mounted into a container. When the NFS mount is active, those paths belong to the mounted NFS filesystem rather than Ubuntu's local ext4 root filesystem. Docker itself does not establish or manage the NFS session in this design:
-* The mounting and unmounting lifecycle is managed entirely by Ubuntu's kernel and `/etc/fstab`.
-* Application definitions in [compose/docker-compose.yml](../compose/docker-compose.yml) declare host paths (e.g., `/mnt/truenas_data/nextcloud/data:/var/www/html/data`), allowing the container runtime to remain agnostic of the underlying storage hardware.
+These application directories should be interpreted as **directories within the exported datastore unless a separate ZFS dataset is independently verified**.
+
+Therefore, this repository deliberately avoids calling `gitea`, `nextcloud`, `npm`, or `pihole` separate ZFS datasets.
 
 ---
 
-## 9. NFS Permission Incident: UID Squashing and Maproot Remediation
+## 6. ESXi NFS Datastore
 
-During the initial deployment of database-backed containers (Nextcloud and Gitea), services crashed repeatedly upon startup, failing to create database locks, temporary directories, or session tables:
-`Permission Denied (errno 13): cannot write to /var/www/html/data`
+Nested ESXi consumes the TrueNAS export as a datastore named:
 
-### 9.1 Root Cause Analysis: NFS Root Mapping
-The verified problem was a permission mismatch when containerized services attempted to write through the NFS-backed mount. Container entrypoints can perform setup operations with elevated privileges, while NFS commonly restricts or remaps client UID 0 so remote root does not automatically receive unrestricted server-side root privileges. In this lab, that identity mismatch prevented required write or ownership operations.
-
-### 9.2 Technical Remediation: TrueNAS Maproot Configuration
-To enable container initialization without breaking POSIX permission hierarchies, the NFS export configuration on TrueNAS SCALE was modified to explicitly override root squashing:
-* **Maproot User:** `root`
-* **Maproot Group:** `root`
-
-This configuration instructs the TrueNAS NFS daemon to treat incoming client requests from UID 0 as legitimate administrative operations, allowing container entrypoint scripts to configure internal directory ownership cleanly.
-
-### 9.3 Security Trade-off Analysis
-* **Risk:** Mapping client root to server root increases the impact of a compromised or misconfigured NFS client because root-originated operations can receive elevated privileges on the export.
-* **Lab Justification:** The Ubuntu compute node was the intended application-side NFS client. Maproot was accepted as a lab-specific compatibility trade-off to resolve the observed permission problem.
-* **General Hardening Options (Not Implemented Here):** A production-oriented design could use more restrictive identity mapping, per-application exports, aligned UIDs/GIDs, or suitable ACLs. These alternatives were not implemented in this lab.
-
----
-
-## 10. Storage Availability and Boot Dependencies
-
-In a decoupled architecture, compute instances depend on storage reachability. Because services communicate across the internal virtual network, specific operational sequencing is required:
-
-```
-[ Power On: TrueNAS SCALE Storage Appliance ]
-                     │
-                     ▼ (Storage pool and NFS service become available)
-[ Power On: Ubuntu Server Compute Node ]
-                     │
-                     ▼ (Netplan Binds 10.10.20.50 & fstab Attaches /mnt/truenas_data)
-[ Start Docker Engine & Microservice Containers ]
-                     │
-                     ▼ (Containers Safely Bind to Active Remote Storage)
-[ Normal System Operation ]
+```text
+NFS_Datastore
 ```
 
-### 10.1 Direct Layer 2 Operational Path
-As established in [docs/architecture-deep-dive.md](architecture-deep-dive.md), both Ubuntu (`10.10.20.50`) and TrueNAS (`10.10.20.x`) reside on the same isolated subnet (`10.10.20.0/24`).
-* **Independence from Firewall Routing:** NFS packets travel directly across the virtual switch. If the pfSense firewall appliance is temporarily halted, internal NFS traffic between Ubuntu and TrueNAS continues uninterrupted.
-* **External Ingress Dependency:** pfSense is required solely for host-to-ingress routing (DNAT) and client internet access; it does not mediate storage I/O.
+The live ESXi interface showed:
 
-### 10.2 The Missing Mount Race Condition
-If the Ubuntu compute node powers on and starts the Docker daemon while the TrueNAS virtual machine is still booting:
-1. Docker evaluates the host path declared in the compose file (`/mnt/truenas_data/nextcloud/data`).
-2. Finding that `/mnt/truenas_data` is an empty, unmounted directory on Ubuntu's local ext4 root volume, Docker will automatically create the subdirectories on the **local virtual disk**.
-3. When the TrueNAS NFS mount eventually attaches seconds later, it overlays itself on top of `/mnt/truenas_data`. The local directories created by Docker become **shadowed** (hidden beneath the mount point), leading to container I/O errors and state inconsistencies.
+```text
+Type: NFS
+Virtual Machines: 3
+```
 
-To verify mount readiness before starting workloads, the diagnostic helper [scripts/nfs-mount-verify.sh](../scripts/nfs-mount-verify.sh) was created to check mount status and directory readability.
+![ESXi NFS datastore](screenshots/05-esxi-nfs-datastore.png)
 
----
+The three project workloads hosted by nested ESXi are:
 
-## 11. Failure Scenarios and Edge Cases
+- `pfSense-Firewall`
+- `Ubuntu_Server_01`
+- `Windows-Server-AD`
 
-A realistic engineering review requires analyzing how the storage subsystem behaves during common operational faults:
+This means TrueNAS storage availability is upstream of the nested VM workload layer.
 
-### 11.1 TrueNAS VM Unavailability
-* **Failure Mode:** TrueNAS SCALE is shut down or experiences a kernel panic while containers on Ubuntu are running.
-* **Behavior:** Applications that depend on the NFS-backed paths can block, fail I/O operations, or become unavailable while the remote storage service is unreachable. Administrative commands that traverse the mount may also block depending on the active NFS mount options and timeout behavior.
-* **Recovery:** Restore TrueNAS/NFS availability first, then verify the mount and application state. Automatic recovery behavior depends on mount options and failure duration, so successful recovery should be verified rather than assumed.
+### Operational consequence
 
-### 11.2 Host-Level Storage Exhaustion
-* **Failure Mode:** The physical host's 512 GB NVMe SSD runs out of free space.
-* **Behavior:** Virtual-disk growth, logging, and application writes may fail or become unstable if the host filesystem runs critically low on free space; exact VMware Workstation behavior depends on the situation and should not be assumed to be an automatic safe suspension.
-* **Mitigation:** Allocating thin-provisioned virtual disks requires proactive monitoring of the physical host drive.
+If the TrueNAS NFS service or storage VM becomes unavailable:
 
-### 11.3 Lack of Physical Redundancy (Single Disk Backing)
-* **Failure Mode:** Underlying physical sector degradation or NVMe SSD hardware failure.
-* **Behavior:** While OpenZFS includes checksumming to identify corrupted blocks, **it cannot repair data** when backed by a single virtual drive without mirror or RAIDZ parity. Checksum verification will log read errors in `zpool status`, but the affected data blocks will be lost.
+- Workstation can remain running;
+- the ESXi VM can remain running;
+- the ESXi NFS datastore becomes unavailable;
+- ESXi-hosted VM disk access is affected;
+- Ubuntu's application NFS mount is also affected.
+
+This centralizes storage management but introduces a deliberate single storage dependency.
 
 ---
 
-## 12. Security Considerations
+## 7. Ubuntu NFS Client
 
-The storage design limits exposure by keeping NFS on the internal server network and by avoiding a pfSense WAN port-forward for NFS. Repository hygiene is used separately to avoid publishing sensitive runtime artifacts.
+Final Ubuntu compute-node addressing:
 
-1. **Subnet-Restricted Exports:**  
-   The NFS data path is designed for the internal `10.10.20.0/24` server segment between Ubuntu and TrueNAS. The exact TrueNAS export ACL/subnet restriction is not asserted here unless separately verified from the live appliance.
-2. **Perimeter Isolation:**  
-   TCP port `2049` does not appear in the verified pfSense DNAT summary ([configs/pfsense/nat-rules-summary.csv](../configs/pfsense/nat-rules-summary.csv)); this repository therefore documents no WAN-side NFS port-forward.
-3. **Repository Sanitization:**  
-   To prevent leaking live infrastructure artifacts, secrets, VM disk images, database files, and other runtime artifacts are excluded according to [.gitignore](../.gitignore). Raw TrueNAS backups and live storage data are intentionally not committed.
+```text
+Ubuntu Server 26.04 LTS
+IP:        10.10.20.50/24
+Interface: ens160
+Gateway:   10.10.20.1
+```
 
----
+### Verified mount
 
-## 13. Verified vs. General OpenZFS Features
+The following command was used to inspect the live mount:
 
-To preserve strict technical accuracy, the table below distinguishes between OpenZFS features verified during this project and enterprise ZFS capabilities that were not implemented:
+```bash
+findmnt -T /mnt/truenas_data -o SOURCE,TARGET,FSTYPE
+```
 
-| OpenZFS Feature | Lab Implementation Status | Technical Context & Justification |
-| :--- | :---: | :--- |
-| **Unified Storage Pool (`zpool`)** | ✅ Verified Live | Basic virtual disk abstraction on TrueNAS SCALE. |
-| **Granular Datasets** | ✅ Verified Live | Independent datasets allocated for application data (`/nextcloud`, `/gitea`, `/pihole`). |
-| **Native `lz4` Compression** | ✅ Verified Live | Documented as enabled for the verified application datasets; actual benefit depends on workload. |
-| **NFSv4 Network Sharing** | ✅ Verified Live | Centralized storage export listening on TCP port 2049. |
-| **Maproot UID Translation** | ✅ Verified Live | Reconfigured to `root:root` to resolve container permission conflicts. |
-| **Copy-on-Write (CoW)** | ℹ️ Inherent OpenZFS Capability | Fundamental filesystem architecture; active by default. |
-| **Block Checksumming (Detection)** | ℹ️ Inherent OpenZFS Capability | Active on all blocks; detects data corruption upon read operations. |
-| **Automated Self-Healing / Repair** | ❌ Not Implemented | Requires multi-disk redundancy (Mirror/RAIDZ) to reconstruct bad blocks. |
-| **ZFS Snapshots & Rollbacks** | ❌ Not Implemented / Not Verified | Supported natively by ZFS, but automated snapshot schedules were not deployed. |
-| **ZFS Send / Receive Replication**| ❌ Not Implemented | Off-site replication was not configured due to single-node scope. |
-| **RAIDZ / Mirroring** | ❌ Not Implemented | Pool backed by a single virtual disk due to hardware limits. |
-| **L2ARC (SSD Read Cache)** | ❌ Not Implemented / Not Verified | Unnecessary overhead for a lightweight virtualized homelab. |
-| **Dedicated SLOG (ZFS Intent Log)**| ❌ Not Implemented | Synchronous writes were handled directly within the main pool. |
-| **Native Dataset Encryption** | ❌ Not Implemented / Not Verified | Datasets were unencrypted to conserve compute and memory resources. |
-| **Block Deduplication** | ❌ Not Implemented / Not Verified | Excluded; deduplication is not documented as part of the verified configuration. |
+Verified output:
 
----
+```text
+SOURCE                                           TARGET              FSTYPE
+192.168.100.128:/mnt/ESXi_Pool/NFS_Datastore    /mnt/truenas_data   nfs4
+```
 
-## 14. Design Limitations
+### Verified route
 
-A rigorous engineering assessment requires acknowledging the architectural constraints of this homelab environment:
+The live routing lookup was:
 
-* **Single Bare-Metal Host (Single Point of Failure):**  
-  TrueNAS, Ubuntu, pfSense, and VMware all execute on a single physical laptop (HP Victus 16). Hardware maintenance, driver crashes, or power loss takes down both compute and storage simultaneously.
-* **Virtualization Layer Overhead:**  
-  Running TrueNAS SCALE inside a Type-2 hypervisor (VMware Workstation Pro) means storage I/O passes through multiple abstraction layers: Guest Application $\rightarrow$ Guest NFS Client $\rightarrow$ Hypervisor Virtual Switch $\rightarrow$ Guest Storage OS $\rightarrow$ Virtual SCSI Controller $\rightarrow$ Host OS VFS $\rightarrow$ Physical NVMe Driver. This introduces latency compared to bare-metal storage arrays.
-* **Non-ECC Memory Environment:**  
-  Consumer laptops lack Error-Correcting Code (ECC) RAM. While OpenZFS safely handles data integrity on disk, memory bitflips can theoretically corrupt data before it is written to the pool.
-* **No Automated Failover:**  
-  Storage high availability (e.g., TrueNAS active/standby pairs or shared SAS multipathing) was not deployed due to hardware and licensing constraints.
+```bash
+ip route get 192.168.100.128
+```
+
+and returned the effective path:
+
+```text
+192.168.100.128 via 10.10.20.1 dev ens160 src 10.10.20.50
+```
+
+Therefore the Ubuntu NFS client reaches TrueNAS through pfSense.
+
+![Ubuntu NFS mount and route](screenshots/06-ubuntu-nfs-routing.png)
 
 ---
 
-## 15. Key Storage Engineering Takeaways
+## 8. Correct Network Path
 
-1. **Compute and Storage Decoupling Simplifies Compute Maintenance:** Offloading persistent application volumes to TrueNAS reduces lifecycle coupling between the Ubuntu compute node and persistent application data, while recovery still depends on correct configuration, mounts, and backups.
-2. **NFSv4 Eliminates Portmapper Complexity:** Standardizing on NFSv4 consolidates storage traffic onto a single deterministic port (`2049/TCP`), avoiding the firewall routing issues associated with legacy NFSv3 RPC portmappers.
-3. **Same-Subnet Storage Keeps the Data Path Simple:** Placing storage and compute nodes on the same isolated subnet (`10.10.20.0/24`) allows direct Layer 2 communication, so NFS traffic does not require pfSense Layer 3 forwarding.
-4. **NFS Root Squashing Can Block Container Initialization:** Container images that perform setup routines as UID 0 will fail on default NFS exports. Configuring `Maproot User: root` resolves permission issues in single-tenant lab setups, though production systems require more granular ACLs.
-5. **Network Mounts Need Explicit Boot-Awareness:** Mounting network filesystems via `/etc/fstab` uses `_netdev` to mark the NFS mount as network-dependent, improving boot ordering without guaranteeing that the remote TrueNAS service is already ready.
-6. **ZFS Checksumming Detects Corruption but Requires Redundancy to Repair:** OpenZFS reliably flags bitrot, but true data self-healing requires physical disk redundancy (mirrors or RAIDZ) that a single-disk virtual lab cannot provide.
-7. **`lz4` Compression Is a Practical Default, Not a Universal Performance Guarantee:** Enabling inline `lz4` compression on ZFS datasets can reduce stored data size with relatively low overhead, but workload-dependent results should not be treated as guaranteed.
-8. **Startup Dependencies Must Account for Remote Storage:** Applications relying on NFS mounts must not initialize before the remote storage pool is confirmed accessible, preventing mount collisions and directory shadowing.
+The verified storage path is:
+
+```text
+Ubuntu
+10.10.20.50
+    |
+    | gateway
+    v
+pfSense
+10.10.20.1
+    |
+    | routed toward 192.168.100.0/24
+    v
+TrueNAS
+192.168.100.128
+```
+
+This replaces an earlier project assumption that Ubuntu and TrueNAS were on the same `10.10.20.0/24` subnet.
+
+### Engineering implication
+
+pfSense is part of the Ubuntu-to-TrueNAS storage path.
+
+If pfSense is down while Ubuntu is running, Ubuntu loses routed reachability to the NFS server even though TrueNAS itself may still be operational.
+
+---
+
+## 9. Persistent Mount Configuration
+
+The live mount source and target were verified with `findmnt`.
+
+The exact current contents of `/etc/fstab` were **not independently captured during the final evidence pass**, so the following should be treated as a reconstructed template matching the verified live mount:
+
+```text
+# Reconstructed template matching the verified live NFS mount
+192.168.100.128:/mnt/ESXi_Pool/NFS_Datastore  /mnt/truenas_data  nfs  defaults,_netdev  0  0
+```
+
+### `_netdev`
+
+`_netdev` marks the mount as network-dependent and helps the init system avoid treating the filesystem like a local disk.
+
+It does not guarantee that:
+
+- pfSense is already routing;
+- TrueNAS is fully booted;
+- the NFS service is ready;
+- the export is reachable.
+
+For that reason, operational readiness should still be verified before dependent application stacks start.
+
+---
+
+## 10. Docker Persistence Layer
+
+Docker itself does not create the NFS session in this design.
+
+The abstraction chain is:
+
+```text
+Container
+    |
+    | bind mount
+    v
+Ubuntu host path
+/mnt/truenas_data/...
+    |
+    | Linux NFS client
+    v
+TrueNAS export
+/mnt/ESXi_Pool/NFS_Datastore
+```
+
+Examples of repository-documented host paths include:
+
+```text
+/mnt/truenas_data/gitea
+/mnt/truenas_data/nextcloud
+/mnt/truenas_data/pihole
+/mnt/truenas_data/npm
+```
+
+The exact container bind paths are documented in the reconstructed Compose artifact:
+
+[`../compose/docker-compose.yml`](../compose/docker-compose.yml)
+
+> **Provenance note:** The repository Compose file is a later consolidated reconstruction. The live environment used separate Portainer Compose stacks.
+
+---
+
+## 11. NFS Permission Incident and Maproot
+
+During the project, container workloads encountered write-permission problems on the TrueNAS-backed storage.
+
+The preserved project history associates the issue with NFS root identity mapping.
+
+### Confirmed lab remediation
+
+The TrueNAS export was configured with:
+
+```text
+Maproot User:  root
+Maproot Group: root
+```
+
+This allowed required root-originated initialization operations to write to the export.
+
+### Security trade-off
+
+This is a **lab-specific compatibility decision**, not a production hardening recommendation.
+
+Mapping remote root to server-side root increases the authority of the client. More restrictive production alternatives can include:
+
+- aligned application UIDs/GIDs;
+- per-service datasets/exports;
+- ACL-based access;
+- dedicated service accounts;
+- narrower client/network restrictions.
+
+Those alternatives were not implemented and should not be described as completed work.
+
+---
+
+## 12. Mount-Race Risk
+
+A network mount creates an important boot-order risk.
+
+If Ubuntu starts Docker workloads before `/mnt/truenas_data` is actually mounted, a bind-mounted path such as:
+
+```text
+/mnt/truenas_data/gitea
+```
+
+could resolve to the ordinary local Ubuntu directory beneath the intended mount point.
+
+That creates a risk of writing data to the Ubuntu VM's local filesystem instead of the TrueNAS export.
+
+### Read-only verification helper
+
+The repository includes:
+
+[`../scripts/nfs-mount-verify.sh`](../scripts/nfs-mount-verify.sh)
+
+This script is a later reconstructed diagnostic helper. It checks:
+
+- mount-point existence;
+- active mount status;
+- filesystem type (`nfs` / `nfs4`);
+- read access;
+- active mount details.
+
+It was **not** the original live deployment mechanism.
+
+---
+
+## 13. Startup Dependency
+
+The storage-aware startup sequence is:
+
+```text
+1. Physical Windows host
+2. VMware Workstation
+3. TrueNAS
+4. Nested ESXi
+5. Confirm NFS_Datastore
+6. pfSense
+7. Windows Server AD
+8. Ubuntu Server
+9. Confirm /mnt/truenas_data
+10. Docker / Portainer stacks
+```
+
+Why this order matters:
+
+- TrueNAS must be available before ESXi relies on its NFS datastore;
+- pfSense must be available before Ubuntu can route to `192.168.100.128`;
+- Ubuntu's NFS mount should be active before containers bind persistent paths.
+
+### Shutdown dependency
+
+Recommended reverse sequence:
+
+```text
+Application workloads
+-> Ubuntu / Windows Server
+-> pfSense
+-> ESXi
+-> TrueNAS
+```
+
+TrueNAS should be the final storage infrastructure VM shut down.
+
+---
+
+## 14. Failure Scenarios
+
+### 14.1 TrueNAS unavailable
+
+Expected impact:
+
+- ESXi `NFS_Datastore` unavailable;
+- nested VM storage affected;
+- Ubuntu NFS mount affected;
+- container persistence affected.
+
+### 14.2 pfSense unavailable
+
+Expected impact while Ubuntu is running:
+
+- Ubuntu loses its verified routed path to TrueNAS;
+- host-side DNAT ingress stops;
+- cross-zone routing stops.
+
+### 14.3 Ubuntu unavailable
+
+Expected impact:
+
+- Docker and Portainer stop;
+- NPM, Pi-hole, Nextcloud, and Gitea stop;
+- TrueNAS and Active Directory can remain independent.
+
+### 14.4 NFS mounted but permissions incorrect
+
+Expected symptom:
+
+- mount appears healthy;
+- container initialization or write operations fail.
+
+This requires checking server-side NFS identity/permission configuration rather than only mount reachability.
+
+---
+
+## 15. Verification Commands
+
+### Confirm mounted source
+
+```bash
+findmnt -T /mnt/truenas_data -o SOURCE,TARGET,FSTYPE
+```
+
+### Confirm route to TrueNAS
+
+```bash
+ip route get 192.168.100.128
+```
+
+### Confirm mount point
+
+```bash
+mountpoint /mnt/truenas_data
+```
+
+### Show mount details
+
+```bash
+findmnt -o SOURCE,TARGET,FSTYPE,OPTIONS -M /mnt/truenas_data
+```
+
+### Basic read test
+
+```bash
+ls -la /mnt/truenas_data
+```
+
+These commands are diagnostic. Write tests should be performed only when intentionally validating permissions and when test data is safe to create/remove.
+
+---
+
+## 16. Evidence Map
+
+| Storage statement | Evidence |
+|---|---|
+| TrueNAS exports NFS and also runs SMB/iSCSI | `screenshots/04-truenas-storage-services.png` |
+| Export path is `/mnt/ESXi_Pool/NFS_Datastore` | `screenshots/04-truenas-storage-services.png` |
+| ESXi consumes NFS datastore | `screenshots/05-esxi-nfs-datastore.png` |
+| ESXi datastore has 3 VMs | `screenshots/05-esxi-nfs-datastore.png` |
+| Ubuntu mounts the same export | `screenshots/06-ubuntu-nfs-routing.png` |
+| Ubuntu routes to TrueNAS via pfSense | `screenshots/06-ubuntu-nfs-routing.png` |
+
+---
+
+## 17. Design Trade-offs
+
+### Advantages
+
+- separates storage administration from application runtime;
+- gives ESXi shared network storage;
+- allows Ubuntu application paths to live on centralized storage;
+- provides practical experience with NFS, ZFS, routing, and dependency ordering;
+- makes storage behavior visible across virtualization layers.
+
+### Limitations
+
+- single TrueNAS VM is a storage failure domain;
+- single physical workstation is the ultimate failure domain;
+- nested virtualization adds latency and complexity;
+- routed NFS makes pfSense part of Ubuntu storage reachability;
+- Maproot weakens NFS isolation compared with more restrictive identity designs;
+- no verified high-availability or physical disk redundancy.
+
+---
+
+## 18. Repository Provenance
+
+| File | Classification |
+|---|---|
+| `screenshots/04-truenas-storage-services.png` | Verified live evidence |
+| `screenshots/05-esxi-nfs-datastore.png` | Verified live evidence |
+| `screenshots/06-ubuntu-nfs-routing.png` | Verified live evidence |
+| `../scripts/nfs-mount-verify.sh` | Reconstructed read-only helper |
+| `../compose/docker-compose.yml` | Reconstructed consolidated Compose |
+| `../configs/netplan/50-cloud-init.yaml` | Reconstructed network template |
+| `../README.md` | Current architecture summary |
+
+---
+
+## 19. Engineering Lessons
+
+1. **Do not infer dataset structure from directory names.**
+2. **Verify live mount sources with `findmnt`, not memory.**
+3. **Verify network paths with the routing table.**
+4. **Central storage changes both startup and shutdown sequencing.**
+5. **NFS reachability and NFS write permissions are different problems.**
+6. **A single exported filesystem can serve multiple infrastructure roles.**
+7. **Reconstructed configuration should always be labeled as reconstructed.**
+8. **Centralization improves manageability but can increase dependency concentration.**
+
+---
+
+## 20. Scope Boundary
+
+This document describes the final verified storage relationships of the homelab.
+
+It does not claim:
+
+- high availability;
+- automatic failover;
+- RAIDZ or mirrored storage;
+- automated snapshots or replication;
+- dedicated ZFS datasets for every application;
+- production NFS security;
+- uninterrupted operation during storage-node failure.

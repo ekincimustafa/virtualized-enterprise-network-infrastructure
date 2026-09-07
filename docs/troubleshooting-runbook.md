@@ -4,326 +4,308 @@
 
 ## 1. Purpose and Scope
 
-This runbook documents the technical failures, configuration conflicts, and operational issues encountered during the design and integration of the **Virtualized Enterprise Network Infrastructure** project.
+This runbook documents failures and configuration conflicts encountered while building the **Virtualized Enterprise Network Infrastructure** homelab.
 
-The goal is not to present an idealized deployment. Instead, the document records the troubleshooting process at the level supported by the preserved project history: observed symptoms, the affected infrastructure layer, the confirmed remediation when it was preserved, and the engineering lesson that followed.
+Its purpose is to preserve:
 
-### Provenance and Artifact Classification
+- the observed symptom;
+- the affected layer;
+- the confirmed or best-supported cause;
+- the resolution actually preserved in the project history;
+- the verification method;
+- the engineering lesson.
 
-This document distinguishes between three categories:
-
-- **Observed during the live project:** behavior or problems encountered while building and testing the VMware-based homelab.
-- **Confirmed resolution:** a setting or command that is documented as having resolved the corresponding issue.
-- **Reconstructed repository artifact:** a configuration template, Compose file, CSV summary, or helper script created later for documentation and reproducibility.
-
-Where an exact command, log line, or root cause was not permanently preserved, this runbook states that explicitly rather than reconstructing it as if it were a live record.
+The document intentionally avoids turning uncertain recollections into exact technical claims.
 
 ---
 
-## 2. Troubleshooting Methodology
+## 2. Provenance Labels
 
-The project used a practical layer-by-layer troubleshooting approach:
+Three evidence levels are used throughout this runbook.
+
+### Observed live behavior
+
+A symptom or state encountered while building or validating the environment.
+
+### Confirmed resolution
+
+A preserved setting, command, or configuration change known to have resolved the issue.
+
+### Reconstructed repository artifact
+
+A file created later to make the project easier to review or reproduce.
+
+Examples:
+
+- `compose/docker-compose.yml`
+- `configs/pfsense/nat-rules-summary.csv`
+- `scripts/lvm-online-extend.sh`
+- `scripts/nfs-mount-verify.sh`
+
+A reconstructed artifact is **not** presented as the original deployment source.
+
+---
+
+## 3. Troubleshooting Method
+
+The project followed a practical bottom-up approach:
 
 ```text
-1. Observe the symptom
-        |
-        v
-2. Identify the affected layer
-   Virtualization / Network / Storage / OS / Container
-        |
-        v
-3. Inspect the current state
-   Interfaces / routes / sockets / mounts / services
-        |
-        v
-4. Change one variable at a time
-        |
-        v
-5. Re-test the affected path
-        |
-        v
-6. Preserve the verified resolution
+1. Identify the visible symptom
+2. Locate the likely infrastructure layer
+3. Inspect actual runtime state
+4. Change one variable
+5. Re-test
+6. Preserve only the verified conclusion
 ```
 
-This approach is especially useful in a virtualized infrastructure because an application symptom can originate from a lower layer. For example, a container startup failure may actually be caused by host disk exhaustion, a host socket conflict, or unavailable network storage.
+Typical inspection layers were:
+
+```text
+Hypervisor
+-> virtual networking
+-> routing / firewall
+-> storage / mount
+-> operating system
+-> Docker
+-> application
+```
+
+A high-level application symptom often originated below the application layer.
 
 ---
 
-## 3. Incident 1 — Nested Virtualization / AMD-V Availability
+# Incident Log
 
-**Layer:** Virtualization / Hypervisor
+## 4. Incident 1 — Nested Virtualization / AMD-V Availability
 
-### Observed Symptom
+**Layer:** Physical host / VMware Workstation / nested hypervisor
 
-The nested VMware ESXi 8.0 test instance encountered hardware-virtualization availability problems when running inside VMware Workstation Pro.
+### Symptom
 
-The project history associates the issue with nested AMD-V exposure and Windows host virtualization features such as VBS / Hyper-V-related layers.
+The nested ESXi VM could not operate correctly when hardware-assisted virtualization was not exposed as required.
+
+The project history associated the problem with nested AMD-V exposure and Windows host virtualization features.
 
 ### Impact
 
-The ESXi evaluation environment could not operate as intended until nested virtualization was correctly exposed to the guest.
+The ESXi layer could not be used as the intended nested hypervisor.
 
 ### Investigation
 
-The troubleshooting process focused on two boundaries:
+Troubleshooting focused on:
 
-1. whether VMware Workstation was exposing hardware-assisted virtualization to the nested guest;
-2. whether Windows host virtualization features were interfering with that exposure.
+- VMware Workstation nested-virtualization settings;
+- whether AMD virtualization extensions were visible inside the nested guest;
+- possible interference from Windows host virtualization layers.
 
-The exact Windows CLI, registry, or feature-toggle sequence used during troubleshooting was not permanently preserved.
+The exact complete Windows feature/registry/CLI sequence was not preserved and is therefore not reconstructed as a guaranteed recipe.
 
-### Confirmed Root Cause
+### Confirmed configuration
 
-The project records support a conflict involving nested hardware-virtualization exposure and host-side virtualization layers. The exact contribution of each Windows virtualization feature was not preserved in enough detail to attribute the failure to one specific setting.
-
-### Resolution
-
-The nested ESXi VM configuration included the following verified VMware `.vmx` parameters:
+The ESXi Workstation VM used:
 
 ```text
 vhv.enable = "TRUE"
 hypervisor.cpuid.v0 = "FALSE"
 ```
 
-Host-side virtualization settings were also reviewed/adjusted during troubleshooting, but the exact Windows changes are not reproduced here because they were not permanently documented.
-
 ### Verification
 
-The nested ESXi instance subsequently operated as a virtualization test environment.
+The final environment successfully ran **VMware ESXi 7.0.3** as a nested Workstation VM and hosted:
 
-### Repository Artifact
+- pfSense;
+- Ubuntu Server;
+- Windows Server AD.
 
-The nested virtualization role and verified `.vmx` parameters are described in [architecture-deep-dive.md](architecture-deep-dive.md).
+### Lesson
 
-### Engineering Lesson
-
-Nested virtualization problems must be diagnosed across both the outer hypervisor and the host operating system. A guest-side virtualization error does not necessarily originate inside the guest.
+Nested virtualization must be diagnosed across both the outer hypervisor and the host operating system.
 
 ---
 
-## 4. Incident 2 — Ubuntu Root Filesystem Exhaustion
+## 5. Incident 2 — Ubuntu Root Filesystem Exhaustion
 
-**Layer:** Compute / Storage / LVM
+**Layer:** Ubuntu / LVM / Docker host storage
 
-### Observed Symptom
+### Symptom
 
-The Ubuntu Server compute node encountered:
+Ubuntu reported:
 
 ```text
 no space left on device
 ```
 
-The failure interrupted container-related operations because the root filesystem had exhausted its allocated space.
+Container/image operations could no longer proceed normally.
 
-### Impact
+### Cause
 
-Docker image and service operations could not continue normally while the root filesystem was full.
+The preserved project history showed unused free extents remaining in the LVM Volume Group while the root Logical Volume had reached its current allocation.
 
-### Investigation
-
-Inspection of the Ubuntu LVM layout showed that free capacity still existed in the Volume Group even though the root Logical Volume had reached its current limit.
-
-The preserved project history confirms the relevant Logical Volume paths:
+Relevant paths:
 
 ```text
 /dev/ubuntu-vg/ubuntu-lv
 /dev/mapper/ubuntu--vg-ubuntu--lv
 ```
 
-Exact disk-size values from the live incident were not retained and are intentionally not reconstructed here.
+### Confirmed resolution
 
-### Confirmed Root Cause
-
-The Ubuntu LVM layout had unused Volume Group capacity that had not yet been allocated to the root Logical Volume.
-
-### Resolution
-
-The following commands were executed manually during the project:
+The commands executed manually were:
 
 ```bash
 sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
 sudo resize2fs /dev/mapper/ubuntu--vg-ubuntu--lv
 ```
 
-The first command allocated the remaining free extents to the root Logical Volume. The second expanded the ext4 filesystem to use the enlarged block device.
+### Result
 
-### Verification
+The logical volume and ext4 filesystem were expanded online.
 
-The root filesystem capacity increased online and the Ubuntu VM did not require a reboot for the resize operation.
+### Reconstructed helper
 
-### Repository Artifact
+[`../scripts/lvm-online-extend.sh`](../scripts/lvm-online-extend.sh)
 
-The later-created helper [lvm-online-extend.sh](../scripts/lvm-online-extend.sh) reconstructs these manual steps with additional safety checks and interactive confirmation.
+The helper was created after the incident and adds:
 
-It is **not** the original deployment script.
+- root checks;
+- target-device validation;
+- filesystem validation;
+- free-extent checks;
+- explicit user confirmation.
 
-### Engineering Lesson
+It was **not** the original live repair script.
 
-Logical disk capacity and filesystem capacity are separate layers. A virtual disk can have available capacity while the mounted filesystem remains full because the Logical Volume has not been expanded.
+### Lesson
+
+Virtual disk size, LVM allocation, and filesystem size are separate capacity layers.
 
 ---
 
-## 5. Incident 3 — NFS Permission / Root Mapping Failure
+## 6. Incident 3 — NFS Write Permission / Root Mapping Failure
 
-**Layer:** Storage / NFS / Container Persistence
+**Layer:** TrueNAS / NFS / Docker persistence
 
-### Observed Symptom
+### Symptom
 
-Containerized services encountered write-permission problems when using the TrueNAS-backed storage mounted at:
+Containerized services could reach the NFS-backed path but encountered write/initialization permission failures.
+
+Affected host mount:
 
 ```text
 /mnt/truenas_data
 ```
 
-### Impact
-
-Applications could not reliably initialize or write their expected persistent data to the NFS-backed paths.
-
 ### Investigation
 
-The troubleshooting process separated two questions:
+The mount itself and the NFS identity/permission model were treated as separate questions:
 
-1. Was the NFS storage mounted and reachable?
-2. Were the identities used by container initialization processes allowed to perform the required filesystem operations?
+1. Is the NFS filesystem mounted?
+2. Can the relevant process identity write to it?
 
-The incident led to investigation of NFS root identity mapping / root-squashing behavior.
+### Best-supported cause
 
-Exact UID traces, packet captures, and complete application error logs were not permanently preserved.
+The preserved project history supports a root identity-mapping conflict between container initialization operations and the TrueNAS NFS export.
 
-### Confirmed Root Cause
+Complete UID traces or packet captures were not preserved.
 
-The preserved project history supports an NFS root-mapping permission conflict between container-side operations and the TrueNAS export.
+### Confirmed lab resolution
 
-### Resolution
-
-The TrueNAS NFS configuration was changed to:
+TrueNAS NFS Maproot was configured as:
 
 ```text
-Maproot User: root
+Maproot User:  root
 Maproot Group: root
 ```
 
-This allowed the required root-originated initialization operations to succeed in the lab.
+### Result
 
-### Verification
+The required container-side storage initialization became writable.
 
-After the storage permission configuration was changed, the affected application storage became writable for the required container operations.
+### Security note
 
-### Repository Artifact
+This increases the authority of a root-capable NFS client and is therefore a **lab-specific trade-off**, not a production default.
 
-The later-created [nfs-mount-verify.sh](../scripts/nfs-mount-verify.sh) is a read-only diagnostic helper that checks the mount point, filesystem type, and readability.
+### Reconstructed diagnostic helper
 
-It is a **reconstructed repository artifact**, not a script that was used during the original incident.
+[`../scripts/nfs-mount-verify.sh`](../scripts/nfs-mount-verify.sh)
 
-### Security Trade-off
+The script is read-only and checks mount state, filesystem type, and readability.
 
-Mapping client root to server root increases privilege on the NFS export. It was accepted as a lab-specific compatibility decision and should not be treated as a universal production recommendation.
+### Lesson
 
-A stricter design could use aligned UIDs/GIDs, more restrictive identity mapping, per-application exports, or appropriate ACLs. Those alternatives were not implemented as part of this project.
-
-### Engineering Lesson
-
-When a container uses a host bind mount backed by NFS, successful mounting alone does not guarantee successful writes. NFS identity mapping and server-side permissions must also match the application's runtime behavior.
+A successful NFS mount does not prove that application write permissions are correct.
 
 ---
 
-## 6. Incident 4 — pfSense Private WAN Filtering
+## 7. Incident 4 — pfSense Private-WAN Filtering
 
-**Layer:** Network / Firewall
+**Layer:** pfSense / network perimeter
 
-### Observed Symptom
+### Symptom
 
-Host-side access through the pfSense WAN-facing lab segment did not behave as required while the WAN interface used the private address:
+Host-side communication through pfSense WAN did not behave as required while the WAN itself used a private RFC1918 network.
 
-```text
-192.168.100.250
-```
-
-on the private host-side network:
+Verified WAN address:
 
 ```text
-192.168.100.0/24
+192.168.100.250/24
 ```
 
-### Impact
+### Cause
 
-The intended host-to-lab ingress path could not operate correctly with the default WAN assumptions left unchanged.
+The pfSense default `Block private networks` behavior conflicts with a lab where legitimate WAN-side traffic originates from a private subnet.
 
-### Investigation
+### Confirmed lab configuration
 
-pfSense WAN defaults are designed for an Internet-facing interface. In this homelab, however, the WAN side itself exists inside an RFC1918 private network.
-
-The relevant WAN options were reviewed:
-
-- `Block private networks`
-- `Block bogon networks`
-
-### Confirmed Root Cause
-
-The **Block private networks** option directly conflicted with the lab design because legitimate host-side traffic originated from an RFC1918 address range.
-
-`Block bogon networks` was also disabled as part of the lab-specific WAN configuration. This runbook does not claim that the bogon option itself was the specific cause of the RFC1918 failure.
-
-### Resolution
-
-On the pfSense WAN interface, the following options were unchecked for this private-WAN lab topology:
+The WAN settings were changed to disable:
 
 ```text
 Block private networks
 Block bogon networks
 ```
 
+The project specifically supports `Block private networks` as conflicting with the RFC1918 WAN design.
+
+`Block bogon networks` was also disabled as part of the lab configuration, but this runbook does not claim it was independently the root cause of the RFC1918 access failure.
+
 ### Verification
 
-The intended host-side ingress path through the pfSense WAN interface became usable after the WAN policy was adjusted.
+The required host-side access path became usable.
 
-### Repository Artifact
+### Lesson
 
-The WAN design is described in [architecture-deep-dive.md](architecture-deep-dive.md). The verified DNAT mappings are summarized separately in [nat-rules-summary.csv](../configs/pfsense/nat-rules-summary.csv).
-
-### Engineering Lesson
-
-A firewall's secure defaults reflect an assumed topology. When a laboratory "WAN" is itself an RFC1918 network, those assumptions must be reviewed rather than disabled blindly.
+Firewall defaults are based on topology assumptions. A private laboratory WAN must be treated differently from a real Internet-facing WAN.
 
 ---
 
-## 7. Incident 5 — pfSense HTTPS Management Port Conflict
+## 8. Incident 5 — pfSense Port 443 Management Conflict
 
-**Layer:** Network / Management Plane / Ingress
+**Layer:** pfSense management plane / application ingress
 
-### Observed Symptom
+### Symptom
 
-pfSense WebConfigurator used `443/TCP`, while Nginx Proxy Manager also needed the lab's WAN-side `443/TCP` ingress path for HTTPS forwarding.
+The pfSense WebConfigurator and the intended Nginx Proxy Manager HTTPS ingress both required WAN-side `443/TCP`.
 
-### Impact
+### Cause
 
-The same WAN address could not cleanly serve the intended pfSense management path and NPM HTTPS ingress design using the same port.
+The same address/port could not cleanly represent both management access and forwarded application ingress.
 
-### Investigation
+### Confirmed resolution
 
-The conflict was treated as a management-plane versus application-ingress problem rather than as an application failure.
-
-The exact internal pfSense web-server process or socket listing was not preserved and is therefore not reconstructed here.
-
-### Confirmed Root Cause
-
-The management interface and the desired HTTPS ingress design competed for the same logical service port on the pfSense WAN address.
-
-### Resolution
-
-pfSense WebConfigurator was moved from:
-
-```text
-443/TCP
-```
-
-to:
+The pfSense WebConfigurator was moved to:
 
 ```text
 8443/TCP
 ```
 
-Port `443/TCP` was then reserved for the verified NPM DNAT path:
+Management URL:
+
+```text
+https://192.168.100.250:8443
+```
+
+WAN `443/TCP` was then available for the verified DNAT rule:
 
 ```text
 192.168.100.250:443
@@ -331,358 +313,674 @@ Port `443/TCP` was then reserved for the verified NPM DNAT path:
 10.10.20.50:443
 ```
 
-This was a **pfSense management listening-port change**, not another DNAT rule.
+### Evidence
 
-### Verification
+[`screenshots/03-pfsense-nat-rules.png`](screenshots/03-pfsense-nat-rules.png)
 
-pfSense administration was available through:
+Sanitized NAT summary:
 
-```text
-https://192.168.100.250:8443
-```
+[`../configs/pfsense/nat-rules-summary.csv`](../configs/pfsense/nat-rules-summary.csv)
 
-while the WAN `443/TCP` mapping could be used for Nginx Proxy Manager ingress.
+### Lesson
 
-### Repository Artifact
-
-The distinction is documented in [nat-rules-summary.csv](../configs/pfsense/nat-rules-summary.csv).
-
-### Engineering Lesson
-
-Management-plane ports should be planned separately from application-ingress ports. Port conflicts at an edge device can look like application routing failures even when the backend service is healthy.
+Management-plane ports should be deliberately separated from application ingress.
 
 ---
 
-## 8. Incident 6 — Port 53 Conflict with `systemd-resolved`
+## 9. Incident 6 — Pi-hole Port 53 Conflict
 
-**Layer:** Compute OS / Container Networking
+**Layer:** Ubuntu / `systemd-resolved` / Docker
 
-### Observed Symptom
+### Symptom
 
-Pi-hole could not bind the required host DNS port because port `53` was already in use on Ubuntu Server.
-
-### Impact
-
-The Pi-hole DNS service could not start with the intended host mappings for:
+Pi-hole could not bind host DNS ports:
 
 ```text
 53/TCP
 53/UDP
 ```
 
-### Investigation
+because another local service already occupied the DNS listener.
 
-The conflict was traced to Ubuntu's local `systemd-resolved` stub listener.
+### Cause
 
-The project history preserves the configuration change, but not every command used to restart or inspect the service.
+Ubuntu's `systemd-resolved` DNS stub listener conflicted with Docker's attempt to publish Pi-hole on host port 53.
 
-### Confirmed Root Cause
+### Confirmed configuration
 
-The local DNS stub listener occupied port 53 in a way that conflicted with Docker's attempt to publish Pi-hole on the host DNS port.
-
-### Resolution
-
-The verified configuration was added to:
-
-```text
-/etc/systemd/resolved.conf
-```
-
-as:
+`/etc/systemd/resolved.conf` was configured with:
 
 ```ini
 [Resolve]
 DNSStubListener=no
 ```
 
-The resolver configuration was then reloaded/restarted so the stub listener no longer occupied the required host port.
+The resolver service was then restarted/reloaded during the live troubleshooting process.
 
-### Verification
+### Result
 
-Pi-hole was subsequently able to bind the intended DNS ports.
+Pi-hole was able to use the intended DNS host ports.
 
-### Repository Artifact
+### Reconstructed artifact
 
-The setting is preserved as a reconstructed configuration template in [resolved.conf](../configs/systemd/resolved.conf).
+[`../configs/systemd/resolved.conf`](../configs/systemd/resolved.conf)
 
-### Engineering Lesson
+### Lesson
 
-When Docker reports a host-port binding conflict, the first diagnostic target should be the host socket table. A container can fail before its own application process starts because another host service already owns the requested port.
+When Docker reports a port-binding failure, inspect host socket ownership before debugging the container application.
 
 ---
 
-## 9. Incident 7 — Nginx Proxy Manager / OpenResty 404
+## 10. Incident 7 — Nginx Proxy Manager / OpenResty 404
 
-**Layer:** Layer 7 Ingress / Reverse Proxy
+**Layer:** Reverse proxy / Layer 7 routing
 
-### Observed Symptom
+### Symptom
 
-Requests routed through Nginx Proxy Manager produced an OpenResty/Nginx-style `404` response instead of the expected backend application.
-
-### Impact
-
-The backend services could exist and still remain inaccessible through their intended `.lab.local` hostnames.
+Requests through Nginx Proxy Manager returned an OpenResty/Nginx-style `404` instead of the intended backend application.
 
 ### Investigation
 
-The troubleshooting process considered multiple layers:
+The troubleshooting path included:
 
-- whether the target backend container was running;
-- whether the backend service was reachable on its host port;
-- whether the incoming `Host` header matched an NPM Proxy Host entry;
-- whether NPM configuration state remained consistent after earlier system/storage problems.
+- checking whether backend containers were running;
+- checking backend host ports directly;
+- checking NPM Proxy Host configuration;
+- checking hostname matching.
 
-Earlier draft documentation associated this incident with host disk saturation and possible NPM/SQLite corruption. The preserved evidence is not strong enough to treat that explanation as a confirmed root cause.
+Earlier drafts attributed the incident to NPM SQLite corruption after storage/disk problems.
 
-### Confirmed Root Cause
+### Root-cause confidence
 
-**Root cause was not conclusively preserved.**
+**The exact root cause was not preserved strongly enough to call SQLite corruption confirmed.**
 
-The observed 404 was consistent with a reverse-proxy routing/configuration problem, but the available project history does not justify attributing it to a specific database-corruption or disk-saturation mechanism.
+The safe conclusion is that the symptom was consistent with missing/incorrect reverse-proxy host routing state.
 
-### Resolution
+### Final verified NPM state
 
-The exact final remediation sequence was not preserved with enough confidence to reproduce it as a verified step-by-step fix.
-
-The project ultimately reached a working state in which the intended NPM host-based mappings routed:
+The final live NPM screen showed:
 
 ```text
-nextcloud.lab.local -> 10.10.20.50:8080
-git.lab.local       -> 10.10.20.50:3000
-pihole.lab.local    -> 10.10.20.50:8053
+git.lab.local
+    -> http://10.10.20.50:3000
+    -> Online
+
+nextcloud.lab.local
+    -> http://10.10.20.50:8080
+    -> Online
 ```
 
-These mappings describe the verified final architecture, not necessarily the exact troubleshooting sequence used during the incident.
+![NPM proxy hosts](screenshots/08-npm-proxy-hosts.png)
 
-### Verification
+### Important correction
 
-The final lab architecture successfully used Nginx Proxy Manager for host-based routing to the documented backend services.
+`pihole.lab.local` exists in Pi-hole DNS, but a corresponding NPM Proxy Host was **not present** in the final verified NPM screen.
 
-### Repository Artifact
+It is therefore not documented as a verified active NPM mapping.
 
-The final routing design is described in [architecture-deep-dive.md](architecture-deep-dive.md).
+### Lesson
 
-### Engineering Lesson
-
-An HTTP 404 should first be attributed to the component that generated it. Direct backend testing and hostname-based proxy testing should be separated before concluding that the application itself is broken.
+Test the backend service and the hostname-based proxy route separately before attributing an HTTP error to the application.
 
 ---
 
-## 10. Incident 8 — Pi-hole v6 Configuration and Password Handling
+## 11. Incident 8 — Pi-hole v6 Configuration Differences
 
-**Layer:** Container / Application Configuration
+**Layer:** Pi-hole / container configuration
 
-### Observed Symptom
+### Symptom
 
-Pi-hole v6 configuration and administrative-password handling differed from older examples and guidance used for previous Pi-hole versions.
+Configuration and password-management assumptions from older Pi-hole versions did not directly match Pi-hole v6.
 
-### Impact
+### Cause
 
-Legacy configuration assumptions could not simply be reused for the v6 deployment.
+Pi-hole v6 uses a revised FTL-centric configuration model.
 
-### Investigation
+### Live-history boundary
 
-The project identified that Pi-hole v6 uses a newer configuration model. The exact interactive password-change command used during live troubleshooting was not permanently preserved.
+The exact interactive password-management command used during the original troubleshooting was not preserved with enough confidence to present as a verified historical command.
 
-### Confirmed Root Cause
+### Repository reconstruction
 
-The issue was a **version-specific configuration mismatch**: legacy Pi-hole configuration examples did not map directly to the Pi-hole v6 behavior used in the lab.
-
-### Resolution
-
-The exact original live CLI sequence is not reconstructed here.
-
-For repository reproducibility, the later-created Compose template uses:
+The later consolidated Compose file uses:
 
 ```yaml
 FTLCONF_webserver_api_password: "${PIHOLE_PASSWORD:?PIHOLE_PASSWORD must be defined in .env}"
 ```
 
-The reconstructed Compose template also contains:
+and the reconstructed Docker-network compatibility setting:
 
 ```yaml
 FTLCONF_dns_listeningMode: 'ALL'
 ```
 
-The latter is documented as a **reconstructed Compose compatibility requirement** for the chosen Docker networking approach, not as a preserved original live deployment setting.
+The second setting is explicitly a **reconstructed Compose deployment requirement**, not a preserved original live environment value.
 
-### Verification
+### Final verification
 
-The final live lab used Pi-hole v6 successfully for local DNS service and local record management. The repository Compose file represents a later reconstruction of the service definition.
+Portainer showed Pi-hole in a healthy state with DNS published on port 53.
 
-### Repository Artifact
-
-See:
-
-- [docker-compose.yml](../compose/docker-compose.yml)
-- [.env.example](../compose/.env.example)
-
-### Engineering Lesson
-
-Major-version upgrades can change configuration interfaces even when the application's high-level role stays the same. Version-specific deployment documentation should be checked before reusing old environment variables or commands.
-
----
-
-## 11. Cross-Layer Troubleshooting Lessons
-
-The incidents demonstrate how failures propagate across infrastructure layers:
+The final local DNS entries were:
 
 ```text
-Physical Host / Hypervisor
-        |
-        +-- Nested virtualization exposure
-        |
-Network Perimeter
-        |
-        +-- Private-WAN filtering
-        +-- Management / ingress port conflict
-        |
-Storage
-        |
-        +-- NFS identity and permission mapping
-        |
-Compute OS
-        |
-        +-- LVM filesystem exhaustion
-        +-- Port 53 host-socket conflict
-        |
-Containers / Layer 7
-        |
-        +-- Reverse-proxy routing
-        +-- Pi-hole version-specific configuration
+192.168.100.250 nextcloud.lab.local
+192.168.100.250 git.lab.local
+192.168.100.250 pihole.lab.local
 ```
 
-### 11.1 Hypervisor Problem vs. Guest Problem
+### Lesson
 
-A guest error can be caused by a host or outer-hypervisor constraint. Nested virtualization is a clear example: changing settings inside ESXi alone cannot solve a problem if hardware virtualization is not exposed through VMware Workstation.
+Major application versions should be documented against the version actually deployed rather than older examples.
 
-### 11.2 Network Problem vs. Application Problem
+---
 
-A service can be healthy while pfSense blocks the path to it. Network reachability, firewall policy, NAT, and application health should be tested as separate stages.
+# Architecture Corrections Discovered During Final Audit
 
-### 11.3 Host Port Conflict vs. Docker Failure
+## 12. Correction 1 — ESXi Is a Core Workload Hypervisor
 
-Docker may report that a container cannot start even when the image and container configuration are otherwise valid. The real problem may simply be that the requested host port is already owned by an operating-system service.
+An early documentation version treated nested ESXi as an evaluation-only environment.
 
-### 11.4 Storage Availability vs. Container Failure
-
-An application error can originate from the filesystem beneath the container. NFS mount state and permissions should be checked before debugging higher-level application behavior.
-
-### 11.5 DNS Resolution vs. HTTP Routing
-
-Internal application access involves at least two separate decisions:
+Final evidence showed that ESXi actually hosts three project VMs:
 
 ```text
-DNS name -> ingress IP
-HTTP Host header -> reverse-proxy backend
+pfSense-Firewall
+Ubuntu_Server_01
+Windows-Server-AD
 ```
 
-A successful DNS lookup does not prove that NPM routing is correct, and a working backend does not prove that the hostname resolves correctly.
+The architecture documentation was therefore corrected.
+
+### Lesson
+
+Runtime topology should be verified from the hypervisor, not inferred from early design notes.
 
 ---
 
-## 12. Diagnostic Command Reference
+## 13. Correction 2 — TrueNAS Is Not on `10.10.20.0/24`
 
-The commands below are **useful diagnostic commands for reproducing or investigating similar failures**. They are not presented as a complete record of commands executed during the original incidents.
+An earlier draft documented TrueNAS as `10.10.20.x`.
 
-### Network and Socket Diagnostics
+Final verification showed:
+
+```text
+TrueNAS: 192.168.100.128
+Ubuntu:  10.10.20.50
+Gateway: 10.10.20.1
+```
+
+The command:
 
 ```bash
-# Display interface addresses and state
-ip addr
-
-# Display routes
-ip route
-
-# Inspect listening TCP/UDP sockets and owning processes
-sudo ss -lntup
-
-# Test reachability to the pfSense LAN gateway from the internal LAN
-ping -c 3 10.10.20.1
-
-# Query an explicitly selected DNS server
-nslookup git.lab.local <dns_server_ip>
+ip route get 192.168.100.128
 ```
 
-### Storage and Filesystem Diagnostics
+showed:
+
+```text
+192.168.100.128 via 10.10.20.1 dev ens160 src 10.10.20.50
+```
+
+Therefore Ubuntu-to-TrueNAS NFS traffic is routed through pfSense.
+
+![Ubuntu NFS routing](screenshots/06-ubuntu-nfs-routing.png)
+
+### Lesson
+
+Do not infer packet paths solely from remembered logical diagrams. Inspect the active routing table.
+
+---
+
+## 14. Correction 3 — Application Directories Are Not Proven ZFS Datasets
+
+Earlier documentation described dedicated datasets for:
+
+```text
+nextcloud
+gitea
+pihole
+```
+
+Final TrueNAS and ESXi evidence showed a common NFS datastore with application directories.
+
+The repository now treats these as directories unless an individual ZFS dataset is independently demonstrated.
+
+### Lesson
+
+A directory name inside an export is not automatically a filesystem/dataset boundary.
+
+---
+
+## 15. Correction 4 — Segmentation Is Not 802.1Q VLAN Tagging
+
+pfSense interface names include:
+
+```text
+VLAN20_SERVERS
+VLAN30_DMZ
+VLAN40_CLIENTS
+VLAN99_GUEST
+```
+
+However, the verified pfSense VLAN configuration table was empty.
+
+The final architecture therefore describes the implementation as:
+
+```text
+separate virtual network segments / virtual NICs
+```
+
+rather than verified 802.1Q tagging.
+
+### Lesson
+
+Interface labels are not evidence of VLAN encapsulation.
+
+---
+
+## 16. Correction 5 — Active Directory Is Implemented
+
+An earlier repository state listed Active Directory as future scope.
+
+Final PowerShell verification showed:
+
+```text
+Active Directory Domain Services: Installed
+DNSRoot:       network.lab
+NetBIOSName:   NETWORK
+DomainMode:    Windows2016Domain
+Forest:        network.lab
+PDCEmulator:   DC01.network.lab
+```
+
+![Active Directory verification](screenshots/10-active-directory-domain.png)
+
+The final documentation now classifies AD DS as implemented.
+
+### Scope boundary
+
+Application authentication integration with AD was not independently verified.
+
+### Lesson
+
+Service installation and service integration are separate claims.
+
+---
+
+## 17. Correction 6 — Final Software/Interface Versions Changed
+
+Final live evidence corrected several early documentation values.
+
+| Earlier documentation | Final verified state |
+|---|---|
+| pfSense 2.7.x | **pfSense 2.8.1** |
+| ESXi 8.0 | **ESXi 7.0.3** |
+| Ubuntu 24.04 LTS | **Ubuntu 26.04 LTS** |
+| Ubuntu `ens33` | **Ubuntu `ens160`** |
+| Workstation 25H2 | **Workstation Pro 26H1** |
+
+### Lesson
+
+Version strings in a portfolio repository should reflect captured live state rather than installation-era assumptions.
+
+---
+
+# Operational Diagnostic Reference
+
+## 18. Virtualization Diagnostics
+
+### ESXi availability
+
+Verify ESXi Host Client is reachable and inspect:
+
+```text
+Storage -> NFS_Datastore
+```
+
+Expected final state:
+
+```text
+Type: NFS
+Virtual Machines: 3
+```
+
+### Workstation topology
+
+Confirm that Workstation directly hosts:
+
+```text
+TrueNAS
+ESXi-1
+```
+
+and that the ESXi inventory contains the three nested VMs.
+
+---
+
+## 19. pfSense Diagnostics
+
+### Interface state
+
+Use:
+
+```text
+Status -> Interfaces
+```
+
+Expected gateway addresses:
+
+```text
+WAN             192.168.100.250
+LAN             10.10.10.1
+VLAN20_SERVERS  10.10.20.1
+VLAN30_DMZ      10.10.30.1
+VLAN40_CLIENTS  10.10.40.1
+VLAN99_GUEST    10.10.99.1
+```
+
+### NAT state
+
+Use:
+
+```text
+Firewall -> NAT -> Port Forward
+```
+
+Expected verified forwards:
+
+```text
+2222 -> 10.10.20.50:22
+80   -> 10.10.20.50:80
+443  -> 10.10.20.50:443
+81   -> 10.10.20.50:81
+9443 -> 10.10.20.50:9443
+```
+
+---
+
+## 20. NFS Diagnostics
+
+### Show the actual mounted source
 
 ```bash
-# Display filesystem usage
-df -h
-
-# Display block devices and mount points
-lsblk
-
-# Inspect LVM Volume Groups
-sudo vgs
-
-# Inspect LVM Logical Volumes
-sudo lvs
-
-# Inspect the NFS-backed mount
-findmnt -o SOURCE,TARGET,FSTYPE,OPTIONS -M /mnt/truenas_data
-
-# Test whether the path is an active mount point
-mountpoint -q /mnt/truenas_data && echo "Mounted" || echo "Not mounted"
+findmnt -T /mnt/truenas_data -o SOURCE,TARGET,FSTYPE
 ```
 
-### Container Runtime Diagnostics
+Expected final source:
+
+```text
+192.168.100.128:/mnt/ESXi_Pool/NFS_Datastore
+```
+
+### Verify route
 
 ```bash
-# List containers and their current state
-docker ps -a
-
-# Inspect recent logs for one container
-docker logs --tail 50 <container_name>
-
-# Inspect Docker's recorded configuration for one container
-docker inspect <container_name>
+ip route get 192.168.100.128
 ```
 
-These commands are diagnostic only. State-changing recovery commands should be used only after the affected layer has been identified and the target system has been verified.
+Expected path contains:
+
+```text
+via 10.10.20.1 dev ens160 src 10.10.20.50
+```
+
+### Check mount point
+
+```bash
+mountpoint /mnt/truenas_data
+```
+
+### Run repository health helper
+
+```bash
+sudo ./scripts/nfs-mount-verify.sh
+```
+
+The helper performs read-only validation.
 
 ---
 
-## 13. Reconstructed Operational Artifacts
+## 21. Docker and Portainer Diagnostics
 
-The repository contains several artifacts created after the live build to make the project easier to review and reproduce.
+The verified live service set contains:
 
-| Repository Artifact | Provenance | Purpose |
-| :--- | :--- | :--- |
-| [`scripts/lvm-online-extend.sh`](../scripts/lvm-online-extend.sh) | 🔄 Reconstructed | Encapsulates the verified manual `lvextend` and `resize2fs` operations with additional safety checks. |
-| [`scripts/nfs-mount-verify.sh`](../scripts/nfs-mount-verify.sh) | 🔄 Reconstructed | Provides a read-only NFS mount health check based on the verified mount design. |
-| [`configs/systemd/resolved.conf`](../configs/systemd/resolved.conf) | 🔄 Reconstructed from verified setting | Preserves the verified `DNSStubListener=no` directive. |
-| [`configs/pfsense/nat-rules-summary.csv`](../configs/pfsense/nat-rules-summary.csv) | 🔄 Sanitized reconstruction | Documents verified DNAT mappings without publishing a raw pfSense backup. |
-| [`compose/docker-compose.yml`](../compose/docker-compose.yml) | 🔄 Reconstructed | Recreates the documented container service definitions for repository reproducibility. |
-| [`compose/.env.example`](../compose/.env.example) | 🔄 Reconstructed | Provides a secret-free environment-variable template for the reconstructed Compose deployment. |
+```text
+gitea
+nextcloud-server-nextcloud-1
+nginx-proxy-manager-app-1
+pihole
+portainer
+```
 
-The artifacts above should not be interpreted as proof that the live environment was originally deployed from these files.
+Expected live published ports include:
+
+```text
+Gitea:       3000:3000, 2223:22
+Nextcloud:   8080:80
+NPM:         80:80, 81:81, 443:443
+Pi-hole:     53:53, 8053:80
+Portainer:   9443:9443, 8000:8000
+```
+
+If a service is unavailable:
+
+1. confirm the container state;
+2. confirm its published port;
+3. test the backend directly;
+4. then test NPM hostname routing.
 
 ---
 
-## 14. Preventive Improvements
+## 22. Pi-hole Diagnostics
 
-The following items are **future recommendations** derived from the incidents. They were not implemented as part of the documented live project unless explicitly stated elsewhere.
+### Verify local records
 
-- **Disk-space monitoring:** alert before the Ubuntu root filesystem or physical host storage reaches a critical threshold.
-- **Configuration backups:** retain sanitized exports or documented settings for pfSense, TrueNAS, and other critical infrastructure.
-- **Service health checks:** validate important sockets and service endpoints after changes or reboots.
-- **Documented startup procedure:** preserve the recommended TrueNAS → Ubuntu/NFS mount → Docker/application startup relationship alongside the separate pfSense ingress dependency.
-- **Periodic mount verification:** verify that `/mnt/truenas_data` is an active NFS mount before dependent applications are started.
-- **More restrictive NFS identity design:** evaluate UID/GID alignment, per-application exports, or suitable ACLs instead of broad root mapping.
-- **Version-pinned container review:** document major-version configuration changes before upgrading infrastructure services such as Pi-hole.
+The final live generated file was observed at:
+
+```text
+/etc/pihole/hosts/custom.list
+```
+
+Relevant records:
+
+```text
+192.168.100.250 nextcloud.lab.local
+192.168.100.250 git.lab.local
+192.168.100.250 pihole.lab.local
+```
+
+> Pi-hole identifies this path as generated configuration. The repository's `configs/pihole/custom.list` is documentation/sanitized reconstruction, not an instruction to overwrite the generated file.
 
 ---
 
-## 15. Key Troubleshooting Takeaways
+## 23. NPM Diagnostics
 
-1. **Troubleshoot the lowest plausible layer first.** A container symptom can originate from disk, networking, storage, or the hypervisor.
-2. **Separate capacity layers.** Virtual-disk size, LVM allocation, and filesystem size are different things and must be checked independently.
-3. **Treat port-binding errors as host-level evidence.** Verify which process owns a socket before changing container configuration.
-4. **Mount success and write permission are different checks.** NFS identity mapping can fail even when the share is reachable.
-5. **Private laboratory WANs require firewall defaults to be reviewed in context.** RFC1918 WAN addressing differs from the topology pfSense normally assumes.
-6. **Keep the management plane distinct from application ingress.** The pfSense `8443` change prevented the management interface from competing with the intended HTTPS ingress port.
-7. **DNS and reverse-proxy routing are independent layers.** Validate name resolution and HTTP host routing separately.
-8. **Do not overstate uncertain root causes.** The NPM/OpenResty 404 incident demonstrates why observed symptoms, investigated possibilities, and confirmed causes should be documented separately.
-9. **Major application versions can invalidate old configuration examples.** Pi-hole v6 required version-aware configuration handling.
-10. **Repository provenance matters.** Reconstructed scripts and templates improve reproducibility only when they are clearly distinguished from artifacts actually used during the live build.
+Final verified Proxy Hosts:
+
+```text
+git.lab.local       -> http://10.10.20.50:3000
+nextcloud.lab.local -> http://10.10.20.50:8080
+```
+
+Both were shown as Online and HTTP Only.
+
+Troubleshooting sequence:
+
+```text
+1. Verify backend container
+2. Verify backend host port
+3. Verify DNS result
+4. Verify NPM Proxy Host
+5. Verify Host header/domain
+6. Test through pfSense WAN :80
+```
+
+---
+
+## 24. Active Directory Diagnostics
+
+Useful read-only verification commands:
+
+```powershell
+Get-WindowsFeature AD-Domain-Services |
+    Select-Object DisplayName, InstallState
+```
+
+and:
+
+```powershell
+Get-ADDomain |
+    Select-Object DNSRoot, NetBIOSName, DomainMode, Forest, PDCEmulator
+```
+
+Verified final values:
+
+```text
+AD DS:       Installed
+DNSRoot:     network.lab
+NetBIOSName: NETWORK
+Forest:      network.lab
+PDCEmulator: DC01.network.lab
+```
+
+---
+
+# Startup / Recovery Runbook
+
+## 25. Cold Start Sequence
+
+Use this dependency-aware order:
+
+```text
+1. Boot Windows host
+2. Start VMware Workstation
+3. Start TrueNAS
+4. Wait for TrueNAS storage/NFS readiness
+5. Start nested ESXi
+6. Confirm NFS_Datastore is available
+7. Start pfSense
+8. Start Windows Server AD
+9. Start Ubuntu
+10. Verify /mnt/truenas_data
+11. Verify Docker / Portainer
+12. Verify Pi-hole and NPM
+13. Verify Nextcloud and Gitea
+```
+
+### Why TrueNAS comes first
+
+ESXi-hosted VM disks reside on the TrueNAS-backed NFS datastore.
+
+### Why pfSense precedes Ubuntu application operation
+
+Ubuntu's verified route to TrueNAS is:
+
+```text
+10.10.20.50
+-> 10.10.20.1
+-> 192.168.100.128
+```
+
+so pfSense is required for the Ubuntu NFS client path.
+
+---
+
+## 26. Controlled Shutdown Sequence
+
+Recommended order:
+
+```text
+1. Stop application activity / containers as appropriate
+2. Shut down Ubuntu
+3. Shut down Windows Server
+4. Halt pfSense
+5. Shut down nested ESXi
+6. Shut down TrueNAS last
+7. Close VMware Workstation
+```
+
+TrueNAS should remain available until its datastore consumers have stopped.
+
+---
+
+# Repository Artifact Safety
+
+## 27. Files That Must Not Be Committed
+
+Do not commit:
+
+```text
+.env
+private keys
+passwords
+tokens
+raw pfSense config.xml
+live SQLite databases
+VM disks
+ISO images
+VM snapshots
+TrueNAS credential-bearing backups
+```
+
+The repository intentionally uses sanitized summaries and reconstructed templates instead.
+
+---
+
+## 28. Reconstruction Labels
+
+These files should retain explicit reconstruction disclaimers:
+
+```text
+compose/docker-compose.yml
+configs/netplan/50-cloud-init.yaml
+configs/systemd/resolved.conf
+configs/pihole/custom.list
+configs/pfsense/nat-rules-summary.csv
+scripts/lvm-online-extend.sh
+scripts/nfs-mount-verify.sh
+```
+
+The goal is reproducibility without rewriting history.
+
+---
+
+## 29. Core Engineering Lessons
+
+1. **Verify the lowest layer first.**
+2. **A healthy container does not prove storage, DNS, or routing is correct.**
+3. **A mounted filesystem does not prove write permissions are correct.**
+4. **An interface named VLAN does not prove 802.1Q tagging.**
+5. **Version-specific application configuration matters.**
+6. **Central storage changes the entire boot dependency graph.**
+7. **Live command output should override remembered topology.**
+8. **Separate observed facts from reconstructed artifacts.**
+9. **Avoid overly specific root-cause claims when evidence is incomplete.**
+10. **Document corrections as part of the engineering process rather than hiding them.**
+
+---
+
+## 30. Related Files
+
+- [`../README.md`](../README.md)
+- [`architecture-deep-dive.md`](architecture-deep-dive.md)
+- [`storage-and-zfs-design.md`](storage-and-zfs-design.md)
+- [`../configs/pfsense/nat-rules-summary.csv`](../configs/pfsense/nat-rules-summary.csv)
+- [`../configs/systemd/resolved.conf`](../configs/systemd/resolved.conf)
+- [`../compose/docker-compose.yml`](../compose/docker-compose.yml)
+- [`../scripts/lvm-online-extend.sh`](../scripts/lvm-online-extend.sh)
+- [`../scripts/nfs-mount-verify.sh`](../scripts/nfs-mount-verify.sh)
+
+---
+
+## 31. Final Scope Boundary
+
+This runbook documents the failures and corrections supported by the preserved project evidence.
+
+It does not claim that:
+
+- every historical command was captured;
+- every incident root cause was proven with logs or packet captures;
+- the lab is production-ready;
+- the lab provides HA or automatic recovery;
+- every `.lab.local` hostname has an NPM route;
+- AD authentication is integrated into every application;
+- 802.1Q VLAN tagging is implemented.
