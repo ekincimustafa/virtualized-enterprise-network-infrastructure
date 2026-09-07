@@ -1,12 +1,21 @@
 # ==============================================================================
-# RECONSTRUCTED CONFIGURATION TEMPLATE BASED ON VERIFIED LIVE NETWORK SETTINGS
-# Target Path: /etc/netplan/50-cloud-init.yaml on Compute Node (Ubuntu Server 24.04)
+# RECONSTRUCTED NETWORK CONFIGURATION TEMPLATE
+#
+# Verified final compute-node state:
+#   Ubuntu Server 26.04 LTS
+#   Interface: ens160
+#   IPv4:      10.10.20.50/24
+#   Gateway:   10.10.20.1
+#
+# The resolver addresses below were documented earlier in the project and were
+# not independently re-validated during the final evidence pass.
+# Target path: /etc/netplan/50-cloud-init.yaml
 # ==============================================================================
 
 network:
   version: 2
   ethernets:
-    ens33:
+    ens160:
       dhcp4: no
       addresses:
         - 10.10.20.50/24
